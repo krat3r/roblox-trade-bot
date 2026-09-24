@@ -6,8 +6,10 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-from trade_bot import cli, rolimons
-from trade_bot.engine import DOWNGRADE, SIDEGRADE, UPGRADE, ComboFinder, TradeRules, generate_trades
+from trade_bot import app, cli, rolimons, tradeads
+from trade_bot.engine import (
+    DOWNGRADE, SIDEGRADE, UPGRADE, ComboFinder, TradeRules, generate_trades, match_trade_ads,
+)
 from trade_bot.models import ItemInfo, OwnedItem
 from trade_bot.scanner import build_inventory
 
@@ -142,13 +144,80 @@ class EngineTests(unittest.TestCase):
                 self.assertTrue(lo <= t.ratio <= hi, (kind, t.ratio))
 
 
+def ad(ad_id, user_id, offer, request_items=(), tags=(), robux=0):
+    return [ad_id, 1700000000, user_id, f"poster{user_id}",
+            {"items": list(offer), "robux": robux}, {"items": list(request_items), "tags": list(tags)}]
+
+
+class TradeAdTests(unittest.TestCase):
+    def setUp(self):
+        self.cat = catalog()
+
+    def parse(self, *ads):
+        return tradeads.parse_trade_ads({"success": True, "trade_ads": list(ads)}, self.cat)
+
+    def test_parse_skips_unknown_items_and_bad_rows(self):
+        ads = self.parse(ad(1, 10, [1], [2]), ad(2, 11, [12345]), ["junk"], ad(3, 12, [4], robux=500))
+        self.assertEqual([a.ad_id for a in ads], [1, 3])
+        self.assertEqual(ads[1].offer_robux, 500)
+        self.assertEqual(ads[0].trade_url, "https://www.roblox.com/users/10/trade")
+
+    def test_exact_request_needs_every_item(self):
+        mine = owned(self.cat, 3, 3, 4)
+        ads = self.parse(
+            ad(1, 10, [2], [3, 3]),        # 50k for my two Small Hats: an even deal they asked for
+            ad(2, 11, [2], [3, 3, 3]),     # wants 3 Small Hats, I only have 2
+        )
+        trades = match_trade_ads(mine, ads)
+        self.assertEqual([t.ad.ad_id for t in trades], [1])
+        self.assertEqual(trades[0].kind, UPGRADE)
+
+    def test_exact_request_rejected_when_bad_for_me(self):
+        mine = owned(self.cat, 1)
+        trades = match_trade_ads(mine, self.parse(ad(1, 10, [3], [1])))  # my 100k for their 25k
+        self.assertEqual(trades, [])
+
+    def test_upgrade_tag_ad_gets_one_bigger_item(self):
+        mine = owned(self.cat, 1, 2, 4)
+        # They offer 50k + 25k + 25k + 10k and want an upgrade: my Big Hat (100k) fits.
+        trades = match_trade_ads(mine, self.parse(ad(1, 10, [2, 3, 3, 4], tags=["upgrade"])))
+        self.assertEqual(len(trades), 1)
+        self.assertEqual([i.asset_id for i in trades[0].give], [1])
+        self.assertEqual(trades[0].kind, DOWNGRADE)
+
+    def test_downgrade_tag_ad_gets_several_smaller_items(self):
+        mine = owned(self.cat, 2, 3, 3, 4)
+        trades = match_trade_ads(mine, self.parse(ad(1, 10, [1], tags=["downgrade"])))
+        self.assertEqual(len(trades), 1)
+        t = trades[0]
+        self.assertGreater(len(t.give), 1)
+        self.assertTrue(0.80 <= t.ratio <= 0.95)
+
+    def test_robux_counts_after_tax_and_robux_only_requests_skipped(self):
+        mine = owned(self.cat, 2)
+        trades = match_trade_ads(mine, self.parse(
+            ad(1, 10, [3, 4], tags=["any"], robux=25000),  # 25k + 10k + 17.5k = 52.5k for my 50k
+            ad(2, 11, [1], tags=["robux"]),
+        ))
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].receive_value, 52500)
+
+    def test_one_trade_per_poster(self):
+        mine = owned(self.cat, 2, 3, 3, 4)
+        trades = match_trade_ads(mine, self.parse(ad(1, 10, [1], tags=["any"]), ad(2, 10, [1], tags=["any"])))
+        self.assertEqual(len(trades), 1)
+
+
 class CliTests(unittest.TestCase):
-    def run_cli(self, argv, assets):
+    def run_cli(self, argv, assets, ads=()):
         def fake_assets(user_id):
             return assets[user_id], set()
 
-        with mock.patch.object(rolimons, "fetch_item_details", return_value=catalog()), \
+        cat = catalog()
+        with mock.patch.object(rolimons, "fetch_item_details", return_value=cat), \
              mock.patch.object(rolimons, "fetch_player_assets", side_effect=fake_assets), \
+             mock.patch.object(tradeads, "fetch_recent_ads",
+                               return_value=tradeads.parse_trade_ads({"trade_ads": list(ads)}, cat)), \
              mock.patch("trade_bot.roblox.resolve_user", side_effect=lambda s: (int(s), f"user{s}")):
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -161,10 +230,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["partner"]["name"], "user2")
         self.assertEqual(data["trades"]["upgrade"][0]["receive"][0]["name"], "Big Hat")
 
-    def test_market_mode_text(self):
-        out = self.run_cli(["1"], {1: {2: [1], 3: [2, 3], 4: [4]}})
-        self.assertIn("Best upgrades from the Rolimons market", out)
+    def test_falls_back_to_market_when_no_ad_matches(self):
+        out = self.run_cli(["1"], {1: {2: [1], 3: [2, 3], 4: [4]}}, ads=[ad(1, 10, [9], [1])])
+        self.assertIn("Nobody in the 1 latest Rolimons trade ads", out)
+        self.assertIn("Best upgrades on the Rolimons market", out)
         self.assertIn("RECEIVE", out)
+
+    def test_shows_matching_ads(self):
+        out = self.run_cli(["1"], {1: {2: [1], 3: [2, 3], 4: [4]}}, ads=[ad(7, 42, [1], tags=["downgrade"])])
+        self.assertIn("Players on Rolimons who want a trade you can do now", out)
+        self.assertIn("Trade ad by poster42", out)
+        self.assertIn("https://www.roblox.com/users/42/trade", out)
+        self.assertNotIn("Rolimons market", out)
+
+    def test_ads_json(self):
+        out = self.run_cli(["1", "--json"], {1: {2: [1], 3: [2, 3], 4: [4]}}, ads=[ad(7, 42, [1], tags=["any"])])
+        data = json.loads(out)
+        self.assertEqual(data["ad_trades"][0]["ad"]["username"], "poster42")
+        self.assertIsNone(data["market_trades"])
+
+    def test_interactive_app(self):
+        cat = catalog()
+        inputs = iter(["1", "404", ""])
+        with mock.patch.object(rolimons, "fetch_item_details", return_value=cat), \
+             mock.patch.object(rolimons, "fetch_player_assets", return_value=({2: [1], 3: [2, 3], 4: [4]}, set())), \
+             mock.patch.object(tradeads, "fetch_recent_ads", return_value=[]), \
+             mock.patch("trade_bot.roblox.resolve_user", side_effect=lambda s: (1, "alice") if s == "1"
+                        else (_ for _ in ()).throw(ValueError(f"No Roblox user named {s!r}"))), \
+             mock.patch("builtins.input", side_effect=lambda _: next(inputs)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = app.main()
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("Scanning 1's inventory", out)
+        self.assertIn("Best upgrades on the Rolimons market", out)
+        self.assertIn("No Roblox user named '404'", out)
 
 
 if __name__ == "__main__":

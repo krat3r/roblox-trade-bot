@@ -1,0 +1,70 @@
+name: Build Windows exe
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -m unittest -v
+
+      - name: Live check against Rolimons (informational)
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -sS https://api.rolimons.com/tradeads/v1/getrecentads | head -c 600; echo
+          python -m trade_bot Linkmon99 --top 3
+
+      - name: Build RolimonsTradeBot.exe
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          pyinstaller --onefile --console --name RolimonsTradeBot RolimonsTradeBot.py
+
+      - name: Smoke-test the exe
+        shell: bash
+        run: |
+          # With no network access to Rolimons this still has to start, print the banner and exit.
+          echo | timeout 120 ./dist/RolimonsTradeBot.exe | tee out.txt || true
+          grep -q "Rolimons Trade Bot" out.txt
+
+      - name: Package the .py version
+        shell: bash
+        run: git archive --format=zip --prefix=roblox-trade-bot/ -o dist/roblox-trade-bot-python.zip HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RolimonsTradeBot
+          path: dist/*
+
+      - name: Move the "latest" tag to this commit
+        shell: bash
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Rolimons Trade Bot (latest build)
+          make_latest: true
+          body: |
+            Built automatically from ${{ github.sha }} on `${{ github.ref_name }}`.
+
+            * **RolimonsTradeBot.exe**: Windows. Double-click it; no Python needed.
+            * **roblox-trade-bot-python.zip**: any OS with Python 3.10+. Unzip and double-click `RolimonsTradeBot.py`.
+          files: |
+            dist/RolimonsTradeBot.exe
+            dist/roblox-trade-bot-python.zip

@@ -6,27 +6,39 @@ Scans a Roblox player's limiteds and suggests the best trades using
 It only **suggests** trades. It never logs into your account or sends anything,
 so it needs no cookie or password.
 
-## Requirements
+## Download
 
-Python 3.10 or newer. There are no packages to install.
+* **Windows:** [RolimonsTradeBot.exe](https://github.com/krat3r/roblox-trade-bot/releases/latest/download/RolimonsTradeBot.exe).
+  Double-click it. You don't need Python.
+* **Any OS with Python 3.10+:** [roblox-trade-bot-python.zip](https://github.com/krat3r/roblox-trade-bot/releases/latest/download/roblox-trade-bot-python.zip).
+  Unzip it and double-click `RolimonsTradeBot.py`.
+
+The `.exe` isn't code-signed, so Windows SmartScreen may say "Windows protected
+your PC". Click **More info → Run anyway**. GitHub Actions builds the `.exe`
+from this repo's source on every push (`.github/workflows/build-exe.yml`).
 
 ## Usage
 
+When it starts, the bot asks for a Roblox username. Then it:
+
+1. Scans that player's limiteds on Rolimons.
+2. Checks the latest **Rolimons trade ads** for players who want a trade this
+   inventory can do right now. For each match it shows what to give and what
+   you get, plus a link to send the trade.
+3. If no one's asking, falls back to the **best trades on the Rolimons market**
+   (upgrades, downgrades and 1-for-1s) to look for.
+
+### Command line
+
+Everything also works from a terminal:
+
 ```bash
-# Best trades for you against the whole Rolimons market
-python -m trade_bot YourUsername
-
-# Best trades using only a specific player's inventory (a real trade partner)
-python -m trade_bot YourUsername --partner TheirUsername
-
-# Only upgrades, top 5, never trade away your Dominus
+python -m trade_bot                                       # interactive
+python -m trade_bot YourUsername                          # trade ads, else market trades
+python -m trade_bot YourUsername --partner TheirUsername  # trades using only their inventory
 python -m trade_bot YourUsername --kind upgrade --top 5 --keep "Dominus Empyreus"
-
-# Machine-readable output
 python -m trade_bot YourUsername --json
 ```
-
-You can pass a user ID instead of a username.
 
 ## How it works
 
@@ -37,7 +49,17 @@ You can pass a user ID instead of a username.
    (`api.rolimons.com/players/v1/playerassets/<id>`). If that fails, the bot falls
    back to the Roblox collectibles API. Items on trade hold are skipped, and a
    private inventory gives a clear error.
-3. **Trade search:** each item is worth its Rolimons value, or its RAP if it has
+3. **Trade ads:** the bot reads `api.rolimons.com/tradeads/v1/getrecentads` and
+   checks each ad against your inventory:
+   * **Ads that name specific items:** you must own every requested item, and the
+     deal can't cost you more than a normal overpay.
+   * **Ads with tags only** ("any", "upgrade", "downgrade", "rares" and so on): the
+     bot builds the best offer from your items that fits the tag and the value
+     windows below.
+
+   Robux in an ad counts at 70%, after Roblox's trade tax. Each poster shows up
+   at most once.
+4. **Market trades (fallback):** each item is worth its Rolimons value, or its RAP if it has
    no value. The bot searches three kinds of trade:
 
    | Kind      | Shape                         | Default window (receive ÷ give) |

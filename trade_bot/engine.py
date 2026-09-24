@@ -23,9 +23,14 @@ import bisect
 import heapq
 import itertools
 import math
+from collections import Counter
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .models import ItemInfo, OwnedItem
+
+if TYPE_CHECKING:
+    from .tradeads import TradeAd
 
 UPGRADE = "upgrade"
 DOWNGRADE = "downgrade"
@@ -33,6 +38,10 @@ SIDEGRADE = "sidegrade"
 KINDS = (UPGRADE, DOWNGRADE, SIDEGRADE)
 
 TREND_SCORE = {-1: 0.0, 0: -1.0, 1: -0.3, 2: 0.0, 3: 0.5, 4: -0.3}
+
+# Roblox takes 30% of any Robux sent in a trade.
+ROBUX_AFTER_TAX = 0.7
+ROBUX_QUALITY = 2.0  # Robux never loses demand
 
 
 @dataclass
@@ -57,14 +66,20 @@ class Trade:
     give: list[ItemInfo]
     receive: list[ItemInfo]
     score: float = 0.0
+    receive_robux: int = 0
+    ad: TradeAd | None = None  # the Rolimons trade ad this trade answers, if any
 
     @property
     def give_value(self) -> int:
         return sum(i.trade_value for i in self.give)
 
     @property
+    def robux_value(self) -> int:
+        return int(self.receive_robux * ROBUX_AFTER_TAX)
+
+    @property
     def receive_value(self) -> int:
-        return sum(i.trade_value for i in self.receive)
+        return sum(i.trade_value for i in self.receive) + self.robux_value
 
     @property
     def ratio(self) -> float:
@@ -78,16 +93,26 @@ class Trade:
         def items(xs):
             return [{"asset_id": i.asset_id, "name": i.name, "value": i.trade_value} for i in xs]
 
-        return {
+        out = {
             "kind": self.kind,
             "give": items(self.give),
             "receive": items(self.receive),
+            "receive_robux": self.receive_robux,
             "give_value": self.give_value,
             "receive_value": self.receive_value,
             "gain": self.gain,
             "ratio": round(self.ratio, 4),
             "score": round(self.score, 4),
         }
+        if self.ad:
+            out["ad"] = {
+                "ad_id": self.ad.ad_id,
+                "user_id": self.ad.user_id,
+                "username": self.ad.username,
+                "created": self.ad.created,
+                "trade_url": self.ad.trade_url,
+            }
+        return out
 
 
 def item_quality(item: ItemInfo) -> float:
@@ -95,14 +120,15 @@ def item_quality(item: ItemInfo) -> float:
     return demand + TREND_SCORE.get(item.trend, 0.0) + (0.5 if item.rare else 0.0)
 
 
-def side_quality(items: list[ItemInfo]) -> float:
-    total = sum(i.trade_value for i in items)
-    return sum(item_quality(i) * i.trade_value for i in items) / total
+def side_quality(items: list[ItemInfo], robux_value: int = 0) -> float:
+    total = sum(i.trade_value for i in items) + robux_value
+    weighted = sum(item_quality(i) * i.trade_value for i in items) + ROBUX_QUALITY * robux_value
+    return weighted / total
 
 
 def score_trade(trade: Trade) -> float:
     # Demand/trend nudges the ranking by up to ~20%; value is the main term.
-    quality_delta = side_quality(trade.receive) - side_quality(trade.give)
+    quality_delta = side_quality(trade.receive, trade.robux_value) - side_quality(trade.give)
     # Fewer items to manage is slightly better, all else equal.
     item_count_penalty = 0.005 * (len(trade.give) + len(trade.receive) - 2)
     return trade.ratio * (1 + 0.04 * quality_delta) - item_count_penalty
@@ -285,3 +311,102 @@ def generate_trades(
         trades.sort(key=lambda t: t.score, reverse=True)
         results[kind] = trades[: rules.per_kind]
     return results
+
+
+def kind_for(n_give: int, n_receive: int) -> str:
+    if n_give > n_receive:
+        return UPGRADE
+    if n_give < n_receive:
+        return DOWNGRADE
+    return SIDEGRADE
+
+
+def _window(rules: TradeRules, kind: str) -> tuple[float, float]:
+    return {UPGRADE: rules.upgrade_ratio, DOWNGRADE: rules.downgrade_ratio, SIDEGRADE: rules.sidegrade_ratio}[kind]
+
+
+def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rules: TradeRules) -> Trade | None:
+    """Best trade you can offer this ad's poster from your inventory, if any."""
+    receive = ad.offer_items
+    if any(i.projected and not rules.allow_projected for i in receive):
+        return None
+    if any(i.hyped and not rules.allow_hyped for i in receive):
+        return None
+    recv_value = sum(i.trade_value for i in receive) + int(ad.offer_robux * ROBUX_AFTER_TAX)
+    if recv_value <= 0:
+        return None
+    n_recv = max(len(receive), 1)
+    tags = set(ad.request_tags)
+
+    if ad.request_items:
+        # They named exactly what they want. You must own every piece.
+        owned = Counter(i.asset_id for i in give_pool)
+        wanted = Counter(i.asset_id for i in ad.request_items)
+        if any(owned[a] < n for a, n in wanted.items()):
+            return None
+        trade = Trade(kind_for(len(ad.request_items), n_recv), list(ad.request_items), list(receive),
+                      receive_robux=ad.offer_robux, ad=ad)
+        # They asked for it, so any deal where you don't lose more than a normal overpay is fine.
+        if trade.ratio < _window(rules, trade.kind)[0]:
+            return None
+        return trade
+
+    # Tag-only ad ("any", "upgrade", "downgrade", ...): build the offer ourselves.
+    if not tags or tags <= {"robux", "projecteds"}:
+        return None  # we never pay Robux or give projecteds
+    if "upgrade" in tags:
+        # They want fewer, bigger items: one of yours for several of theirs, or 1:1 for something bigger.
+        give_counts = [n for n in range(1, rules.max_give + 1) if n < n_recv or n == n_recv == 1]
+    elif "downgrade" in tags:
+        give_counts = [n for n in range(2, rules.max_give + 1) if n > n_recv]
+    else:
+        give_counts = list(range(1, rules.max_give + 1))
+
+    biggest_offer = max((i.trade_value for i in receive), default=0)
+    best: Trade | None = None
+    for n in give_counts:
+        kind = kind_for(n, n_recv)
+        lo_r, hi_r = _window(rules, kind)
+        # Keep the shape honest: an upgrade gives you something bigger than any piece you hand over.
+        max_piece = biggest_offer - 1 if kind == UPGRADE else None
+        for combo in finder.find(
+            lo=recv_value / hi_r, hi=recv_value / lo_r, min_n=n, max_n=n,
+            prefer_high=False, limit=1, budget=rules.search_budget, max_item_value=max_piece,
+        ):
+            if "upgrade" in tags and combo[0].trade_value <= biggest_offer:
+                continue  # not an upgrade for them
+            if kind == DOWNGRADE and combo[0].trade_value <= biggest_offer:
+                continue
+            if tags == {"rares"} and not any(i.rare for i in combo):
+                continue
+            trade = Trade(kind, combo, list(receive), receive_robux=ad.offer_robux, ad=ad)
+            trade.score = score_trade(trade)
+            if best is None or trade.score > best.score:
+                best = trade
+    return best
+
+
+def match_trade_ads(my_items: list[OwnedItem], ads: list[TradeAd], rules: TradeRules | None = None,
+                    limit: int = 15) -> list[Trade]:
+    """Trades you could send right now to players with live Rolimons trade ads, best first.
+
+    One trade per poster, so the list isn't flooded by someone who spams ads.
+    """
+    rules = rules or TradeRules()
+    give_pool = giveable_pool(my_items, rules)
+    if not give_pool:
+        return []
+    finder = ComboFinder(give_pool)
+    best_per_user: dict[int, Trade] = {}
+    for ad in ads:
+        trade = _answer_ad(ad, give_pool, finder, rules)
+        if trade is None:
+            continue
+        trade.score = score_trade(trade)
+        # Ads where they named your exact items are much likelier to be accepted.
+        if ad.request_items:
+            trade.score += 0.05
+        current = best_per_user.get(ad.user_id)
+        if current is None or trade.score > current.score:
+            best_per_user[ad.user_id] = trade
+    return sorted(best_per_user.values(), key=lambda t: t.score, reverse=True)[:limit]
