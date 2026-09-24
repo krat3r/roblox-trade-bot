@@ -25,7 +25,7 @@ import itertools
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .models import ItemInfo, OwnedItem
 
@@ -68,6 +68,7 @@ class Trade:
     score: float = 0.0
     receive_robux: int = 0
     ad: TradeAd | None = None  # the Rolimons trade ad this trade answers, if any
+    growth: float | None = None  # growth outlook (see outlook.py), when computed
 
     @property
     def give_value(self) -> int:
@@ -104,6 +105,8 @@ class Trade:
             "ratio": round(self.ratio, 4),
             "score": round(self.score, 4),
         }
+        if self.growth is not None:
+            out["growth_outlook"] = round(self.growth, 3)
         if self.ad:
             out["ad"] = {
                 "ad_id": self.ad.ad_id,
@@ -251,18 +254,32 @@ def _unique_assets(items: list[ItemInfo]) -> list[ItemInfo]:
     return list(seen.values())
 
 
+Rank = Callable[[Trade], float]
+
+
+def _best(trades: list[Trade], rank: Rank | None) -> list[Trade]:
+    """With a custom ranking, keep only the best of an anchor's candidates."""
+    if rank is None or not trades:
+        return trades
+    return [max(trades, key=rank)]
+
+
 def generate_trades(
     my_items: list[OwnedItem],
     their_items: list[ItemInfo],
     rules: TradeRules | None = None,
+    rank: Rank | None = None,
 ) -> dict[str, list[Trade]]:
     """Return the best trades of each kind, best first.
 
     my_items: your inventory (one entry per copy).
     their_items: what you could receive. One entry per copy for a real trade
         partner, or one entry per item for the whole Rolimons catalog.
+    rank: how to order trades. Defaults to score_trade (value first). With a
+        custom rank, several value-valid combos per item are compared by it.
     """
     rules = rules or TradeRules()
+    candidates = 1 if rank is None else 8
     give_pool = giveable_pool(my_items, rules)
     recv_pool = receivable_pool(their_items, rules)
     results: dict[str, list[Trade]] = {k: [] for k in KINDS}
@@ -278,10 +295,10 @@ def generate_trades(
         v = target.trade_value
         combos = give_finder.find(
             lo=v / hi_r, hi=v / lo_r, min_n=2, max_n=rules.max_give,
-            prefer_high=False, limit=1, budget=rules.search_budget,
+            prefer_high=False, limit=candidates, budget=rules.search_budget,
             max_item_value=v - 1,
         )
-        results[UPGRADE] += [Trade(UPGRADE, combo, [target]) for combo in combos]
+        results[UPGRADE] += _best([Trade(UPGRADE, combo, [target]) for combo in combos], rank)
 
     # Downgrades: one of mine -> several of theirs, each worth less than what I give.
     lo_r, hi_r = rules.downgrade_ratio
@@ -289,10 +306,10 @@ def generate_trades(
         v = mine.trade_value
         combos = recv_finder.find(
             lo=v * lo_r, hi=v * hi_r, min_n=2, max_n=rules.max_receive,
-            prefer_high=True, limit=1, budget=rules.search_budget,
+            prefer_high=True, limit=candidates, budget=rules.search_budget,
             max_item_value=v - 1,
         )
-        results[DOWNGRADE] += [Trade(DOWNGRADE, [mine], combo) for combo in combos]
+        results[DOWNGRADE] += _best([Trade(DOWNGRADE, [mine], combo) for combo in combos], rank)
 
     # Sidegrades: one for one.
     lo_r, hi_r = rules.sidegrade_ratio
@@ -300,7 +317,7 @@ def generate_trades(
         v = mine.trade_value
         for combo in recv_finder.find(
             lo=v * lo_r, hi=v * hi_r, min_n=1, max_n=1,
-            prefer_high=True, limit=3, budget=rules.search_budget,
+            prefer_high=True, limit=3 * candidates, budget=rules.search_budget,
         ):
             if combo[0].asset_id != mine.asset_id:
                 results[SIDEGRADE].append(Trade(SIDEGRADE, [mine], combo))
@@ -308,7 +325,7 @@ def generate_trades(
     for kind, trades in results.items():
         for t in trades:
             t.score = score_trade(t)
-        trades.sort(key=lambda t: t.score, reverse=True)
+        trades.sort(key=rank or (lambda t: t.score), reverse=True)
         results[kind] = trades[: rules.per_kind]
     return results
 
@@ -346,7 +363,8 @@ def _satisfies_tags(tags: set[str], give: list[ItemInfo]) -> bool:
     return any(checks[t] for t in wanted)
 
 
-def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rules: TradeRules) -> Trade | None:
+def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rules: TradeRules,
+               rank: Rank | None = None) -> Trade | None:
     """Best trade you can offer this ad's poster from your inventory, if any."""
     receive = ad.offer_items
     if any(i.projected and not rules.allow_projected for i in receive):
@@ -392,7 +410,8 @@ def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rule
         max_piece = biggest_offer - 1 if kind == UPGRADE else None
         for combo in finder.find(
             lo=recv_value / hi_r, hi=recv_value / lo_r, min_n=n, max_n=n,
-            prefer_high=False, limit=1, budget=rules.search_budget, max_item_value=max_piece,
+            prefer_high=False, limit=1 if rank is None else 8, budget=rules.search_budget,
+            max_item_value=max_piece,
         ):
             if "upgrade" in tags and combo[0].trade_value <= biggest_offer:
                 continue  # not an upgrade for them
@@ -402,13 +421,13 @@ def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rule
                 continue
             trade = Trade(kind, combo, list(receive), receive_robux=ad.offer_robux, ad=ad)
             trade.score = score_trade(trade)
-            if best is None or trade.score > best.score:
+            if best is None or (rank or score_trade)(trade) > (rank or score_trade)(best):
                 best = trade
     return best
 
 
 def match_trade_ads(my_items: list[OwnedItem], ads: list[TradeAd], rules: TradeRules | None = None,
-                    limit: int = 15) -> list[Trade]:
+                    limit: int = 15, rank: Rank | None = None) -> list[Trade]:
     """Trades you could send right now to players with live Rolimons trade ads, best first.
 
     One trade per poster, so the list isn't flooded by someone who spams ads.
@@ -420,14 +439,15 @@ def match_trade_ads(my_items: list[OwnedItem], ads: list[TradeAd], rules: TradeR
     finder = ComboFinder(give_pool)
     best_per_user: dict[int, Trade] = {}
     for ad in ads:
-        trade = _answer_ad(ad, give_pool, finder, rules)
+        trade = _answer_ad(ad, give_pool, finder, rules, rank)
         if trade is None:
             continue
         trade.score = score_trade(trade)
         # Ads where they named your exact items are much likelier to be accepted.
         if ad.request_items:
             trade.score += 0.05
+        key = rank or (lambda t: t.score)
         current = best_per_user.get(ad.user_id)
-        if current is None or trade.score > current.score:
+        if current is None or key(trade) > key(current):
             best_per_user[ad.user_id] = trade
-    return sorted(best_per_user.values(), key=lambda t: t.score, reverse=True)[:limit]
+    return sorted(best_per_user.values(), key=rank or (lambda t: t.score), reverse=True)[:limit]

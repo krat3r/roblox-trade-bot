@@ -29,7 +29,7 @@ def ask(prompt: str) -> str | None:
 
 
 def scan_once(username: str, catalog) -> None:
-    print(f"\nScanning {username}'s inventory on Rolimons...")
+    print(f"\nScanning {username}'s inventory on Rolimons (big inventories can take up to a minute)...")
     me = scan_player(username, catalog)
     if not me.items:
         print(f"{me.username} has no tradeable limiteds.")

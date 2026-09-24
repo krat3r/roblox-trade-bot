@@ -76,7 +76,8 @@ class PrivateInventoryError(RuntimeError):
 
 def fetch_player_assets(user_id: int) -> tuple[dict[int, list[int]], set[int]]:
     """Return ({asset_id: [uaid, ...]}, {uaids on trade hold}) from a Rolimons scan."""
-    payload = request_json(PLAYER_ASSETS_URL.format(user_id=user_id))
+    # Rolimons scans big inventories live on first request, which can take a while.
+    payload = request_json(PLAYER_ASSETS_URL.format(user_id=user_id), timeout=90)
     if not payload.get("success", False):
         raise RuntimeError(f"Rolimons could not scan player {user_id}")
     if payload.get("playerPrivacyEnabled"):

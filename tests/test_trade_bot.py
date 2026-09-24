@@ -1,12 +1,16 @@
+import datetime as dt
 import io
 import json
 import random
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from contextlib import redirect_stdout
 from unittest import mock
 
-from trade_bot import app, cli, rolimons, tradeads
+from trade_bot import app, cli, history, rolimons, tradeads
+from trade_bot.outlook import Outlook, outlook_label
 from trade_bot.engine import (
     DOWNGRADE, SIDEGRADE, UPGRADE, ComboFinder, TradeRules, generate_trades, match_trade_ads,
 )
@@ -28,8 +32,22 @@ ITEM_DETAILS = {
         "7": ["Hyped Hat", "", 60000, 60000, 60000, 4, 3, -1, 1, -1],
         "8": ["Dud Hat", "", 40000, 40000, 40000, 0, 0, -1, -1, -1],
         "9": ["Crown", "", 190000, 200000, 200000, 4, 3, -1, -1, 1],
+        "10": ["Sinking Hat", "", 20000, 25000, 25000, 1, 0, -1, -1, -1],
     },
 }
+
+
+def setUpModule():
+    # Keep the RAP history the bot saves out of the real cache folder.
+    global _tmp, _history_patch
+    _tmp = tempfile.TemporaryDirectory()
+    _history_patch = mock.patch.object(history, "HISTORY_PATH", Path(_tmp.name) / "rap_history.json")
+    _history_patch.start()
+
+
+def tearDownModule():
+    _history_patch.stop()
+    _tmp.cleanup()
 
 
 def catalog():
@@ -221,6 +239,46 @@ class TradeAdTests(unittest.TestCase):
         self.assertEqual(len(trades), 1)
 
 
+class GrowthTests(unittest.TestCase):
+    def setUp(self):
+        self.cat = catalog()
+
+    def test_item_outlook_ordering(self):
+        o = Outlook()
+        crown, small, sinking = self.cat[9], self.cat[3], self.cat[10]
+        self.assertGreater(o.item(crown), o.item(small))
+        self.assertGreater(o.item(small), o.item(sinking))
+        self.assertLess(o.item(self.cat[6]), 0)  # projected
+        self.assertEqual(outlook_label(o.item(crown)), "Strong")
+        self.assertEqual(outlook_label(o.item(sinking)), "Poor")
+
+    def test_momentum_moves_outlook(self):
+        up, down = Outlook({3: 0.3}), Outlook({3: -0.3})
+        self.assertGreater(up.item(self.cat[3]), Outlook().item(self.cat[3]))
+        self.assertLess(down.item(self.cat[3]), Outlook().item(self.cat[3]))
+
+    def test_history_needs_a_few_days(self):
+        day0 = dt.date(2026, 1, 1)
+        history.HISTORY_PATH.unlink(missing_ok=True)
+        self.assertEqual(history.record_and_get_momentum(self.cat, day0), {})
+        self.assertEqual(history.record_and_get_momentum(self.cat, day0 + dt.timedelta(days=1)), {})
+        later = dict(self.cat)
+        later[3] = ItemInfo(**{**self.cat[3].__dict__, "rap": 39000})  # 26k -> 39k = +50%
+        momentum = history.record_and_get_momentum(later, day0 + dt.timedelta(days=5))
+        self.assertAlmostEqual(momentum[3], 0.5)
+        self.assertAlmostEqual(momentum[1], 0.0)
+
+    def test_growth_rank_avoids_lowering_items(self):
+        mine = owned(self.cat, 1)
+        theirs = [self.cat[i] for i in (2, 3, 3, 10, 10, 4)]
+        rules = TradeRules(min_receive_demand=-1)
+        o = Outlook()
+        dn = generate_trades(mine, theirs, rules, rank=o.rank)[DOWNGRADE]
+        self.assertEqual(len(dn), 1)
+        self.assertNotIn(10, [i.asset_id for i in dn[0].receive])
+        self.assertTrue(1.05 <= dn[0].ratio <= 1.20)
+
+
 class CliTests(unittest.TestCase):
     def run_cli(self, argv, assets, ads=()):
         def fake_assets(user_id):
@@ -248,6 +306,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("Nobody in the 1 latest Rolimons trade ads", out)
         self.assertIn("Best upgrades on the Rolimons market", out)
         self.assertIn("RECEIVE", out)
+        self.assertIn("Best trades on the market for long-term growth", out)
+        self.assertIn("Growth outlook:", out)
 
     def test_shows_matching_ads(self):
         out = self.run_cli(["1"], {1: {2: [1], 3: [2, 3], 4: [4]}}, ads=[ad(7, 42, [1], tags=["downgrade"])])
@@ -276,7 +336,7 @@ class CliTests(unittest.TestCase):
                 code = app.main()
         out = buf.getvalue()
         self.assertEqual(code, 0)
-        self.assertIn("Scanning 1's inventory", out)
+        self.assertIn("Scanning 1's inventory on Rolimons", out)
         self.assertIn("Best upgrades on the Rolimons market", out)
         self.assertIn("No Roblox user named '404'", out)
 

@@ -27,6 +27,8 @@ When it starts, the bot asks for a Roblox username. Then it:
    you get, plus a link to send the trade.
 3. If no one's asking, falls back to the **best trades on the Rolimons market**
    (upgrades, downgrades and 1-for-1s) to look for.
+4. Shows the **best trades for long-term growth**: the trades where what you
+   receive is likeliest to gain value compared to what you give.
 
 ### Command line
 
@@ -72,6 +74,32 @@ python -m trade_bot YourUsername --json
    player won't be accepted. Inside a window, the trade that's best for you
    ranks first. Demand, trend and rarity also adjust the ranking, so a
    high-demand item that's raising beats a dead item at the same value.
+
+### Growth predictions
+
+Every trade shows a **growth outlook** (Strong / Good / Neutral / Weak / Poor).
+It compares how likely what you receive is to rise against what you give.
+Rolimons' public API has no price history, so the outlook is an estimate
+built from these signals:
+
+| Signal | Effect |
+|---|---|
+| Rolimons trend | raising ↑, lowering ↓↓, unstable/fluctuating ↓ |
+| Demand | Amazing/High ↑, Low/Terrible ↓ |
+| RAP vs value | RAP above value means buyers pay more than the value, which tends to get raised ↑ (and vice versa) |
+| Rare | ↑ |
+| Hyped / projected | ↓ (hype fades, projected RAP crashes) |
+| RAP momentum | real RAP change since the oldest day the bot has saved |
+
+The bot saves every item's RAP once a day in
+`~/.cache/roblox-trade-bot/rap_history.json` (45 days are kept). After a few
+days of use, real momentum feeds into the outlook too. For the growth list, the
+bot searches your trades again. This time it prefers giving away items that are
+falling and receiving items that are rising, while staying inside the same fair
+value windows.
+
+This is a prediction, not a guarantee. Roblox prices can move on things no
+data shows, like a Roblox event, a rerelease, or someone buying up an item.
 
 By default the bot skips these items:
 

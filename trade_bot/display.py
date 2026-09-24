@@ -7,6 +7,7 @@ import time
 
 from .engine import Trade
 from .models import DEMAND_LABELS, TREND_LABELS, Inventory, ItemInfo
+from .outlook import outlook_label
 
 
 def safe_console() -> None:
@@ -58,6 +59,8 @@ def print_trade(n: int, t: Trade) -> None:
     if t.ad:
         wants = "your exact items" if t.ad.request_items else ", ".join(t.ad.request_tags)
         print(f"      Trade ad by {t.ad.username} ({ago(t.ad.created)}), asking for: {wants}")
+    if t.growth is not None:
+        print(f"      Growth outlook: {outlook_label(t.growth)} ({t.growth:+.2f})")
     print(f"      GIVE    {fmt(t.give_value):>12}")
     for i in t.give:
         print(f"        - {describe(i)}")

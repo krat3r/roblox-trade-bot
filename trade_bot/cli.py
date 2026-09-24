@@ -122,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             "ad_trades": [t.to_dict() for t in found.ad_trades],
             "market_trades": {k: [t.to_dict() for t in found.market_trades[k]] for k in kinds}
             if found.market_trades else None,
+            "growth_trades": [t.to_dict() for t in found.growth_trades],
         }, indent=2))
         return 0
     print_inventory(me)
@@ -134,8 +135,17 @@ def print_suggestions(found, kinds=KINDS) -> None:
     if found.ad_trades:
         print_section(f"Players on Rolimons who want a trade you can do now "
                       f"({found.ads_scanned} ads scanned)", found.ad_trades)
-        return
-    print(f"\nNobody in the {found.ads_scanned} latest Rolimons trade ads wants a trade you can do right now.")
-    print("Here are the best trades to look for instead:")
-    for kind in kinds:
-        print_section(f"Best {kind}s on the Rolimons market", found.market_trades[kind])
+    else:
+        print(f"\nNobody in the {found.ads_scanned} latest Rolimons trade ads wants a trade you can do right now.")
+        print("Here are the best trades to look for instead:")
+        for kind in kinds:
+            print_section(f"Best {kind}s on the Rolimons market", found.market_trades[kind])
+
+    source = "from those trade ads" if found.ad_trades else "on the market"
+    print_section(f"Best trades {source} for long-term growth", found.growth_trades,
+                  empty="none of your trades are likely to gain value over time")
+    print("\n  Growth outlook is an estimate from Rolimons trend, demand, RAP vs value, rarity and hype.")
+    if found.has_momentum:
+        print("  It also includes RAP momentum from the history this bot has saved.")
+    else:
+        print("  Run the bot on a few different days and it will also use real RAP momentum.")

@@ -46,6 +46,8 @@ def request_json(url: str, *, body: dict | None = None, retries: int = 3, timeou
                 continue
             raise HttpError(url, e.code, e.reason) from e
         except (urllib.error.URLError, TimeoutError) as e:
+            if DEBUG:
+                print(f"[http] failed after {time.monotonic() - started:.1f}s ({e}) {url}", file=sys.stderr)
             if attempt < retries:
                 time.sleep(delay)
                 delay *= 2
