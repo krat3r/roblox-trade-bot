@@ -202,6 +202,19 @@ class TradeAdTests(unittest.TestCase):
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0].receive_value, 52500)
 
+    def test_numeric_tags_are_named(self):
+        ads = self.parse(ad(1, 10, [1], tags=[4, 5, 10]), ad(2, 11, [1], tags=["Downgrade"]), ad(3, 12, [1], tags=[99]))
+        self.assertEqual(ads[0].request_tags, ["any", "upgrade", "adds"])
+        self.assertEqual(ads[1].request_tags, ["downgrade"])
+        self.assertEqual(ads[2].request_tags, ["tag99"])
+
+    def test_demand_tag_rejects_low_demand_items(self):
+        # Their Big Hat for my stack: my Tiny Hat (Low demand) can't be part of a "demand" offer...
+        mine = owned(self.cat, 2, 3, 3, 4)
+        self.assertEqual(match_trade_ads(mine, self.parse(ad(1, 10, [1], tags=[1]))), [])
+        # ...but with "any" it's fine.
+        self.assertEqual(len(match_trade_ads(mine, self.parse(ad(1, 10, [1], tags=[1, 4])))), 1)
+
     def test_one_trade_per_poster(self):
         mine = owned(self.cat, 2, 3, 3, 4)
         trades = match_trade_ads(mine, self.parse(ad(1, 10, [1], tags=["any"]), ad(2, 10, [1], tags=["any"])))

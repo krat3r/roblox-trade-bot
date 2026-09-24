@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 import urllib.error
 import urllib.request
 
+DEBUG = bool(os.environ.get("TRADE_BOT_DEBUG"))
 USER_AGENT = "roblox-trade-bot/1.0 (+https://github.com/krat3r/roblox-trade-bot)"
 
 
@@ -26,10 +29,16 @@ def request_json(url: str, *, body: dict | None = None, retries: int = 3, timeou
     delay = 2.0
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers)
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode())
+                body = resp.read()
+            if DEBUG:
+                print(f"[http] {resp.status} {time.monotonic() - started:.1f}s {url}", file=sys.stderr)
+            return json.loads(body.decode())
         except urllib.error.HTTPError as e:
+            if DEBUG:
+                print(f"[http] {e.code} {time.monotonic() - started:.1f}s {url}", file=sys.stderr)
             # 429 = rate limited, 5xx = server trouble: worth retrying.
             if (e.code == 429 or e.code >= 500) and attempt < retries:
                 time.sleep(delay)

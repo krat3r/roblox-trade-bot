@@ -325,6 +325,27 @@ def _window(rules: TradeRules, kind: str) -> tuple[float, float]:
     return {UPGRADE: rules.upgrade_ratio, DOWNGRADE: rules.downgrade_ratio, SIDEGRADE: rules.sidegrade_ratio}[kind]
 
 
+def _satisfies_tags(tags: set[str], give: list[ItemInfo]) -> bool:
+    """Whether what you'd give matches what the poster asked for.
+
+    "any" accepts anything. Otherwise any one of the item-quality tags they
+    picked has to be met. Shape tags (upgrade/downgrade) and "adds" are
+    handled by the search itself.
+    """
+    if "any" in tags:
+        return True
+    checks = {
+        "demand": all(i.demand >= 2 for i in give),
+        "rares": any(i.rare for i in give),
+        "rap": all(not i.has_value for i in give),
+    }
+    wanted = [t for t in tags if t in checks]
+    if not wanted:
+        # Only shape tags, or tags we can't check from here (wishlist): value decides.
+        return "wishlist" not in tags or bool(tags & {"upgrade", "downgrade", "adds"})
+    return any(checks[t] for t in wanted)
+
+
 def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rules: TradeRules) -> Trade | None:
     """Best trade you can offer this ad's poster from your inventory, if any."""
     receive = ad.offer_items
@@ -352,8 +373,8 @@ def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rule
         return trade
 
     # Tag-only ad ("any", "upgrade", "downgrade", ...): build the offer ourselves.
-    if not tags or tags <= {"robux", "projecteds"}:
-        return None  # we never pay Robux or give projecteds
+    if not tags or tags <= {"robux", "projecteds", "wishlist"}:
+        return None  # we never pay Robux or give projecteds, and can't see their wishlist
     if "upgrade" in tags:
         # They want fewer, bigger items: one of yours for several of theirs, or 1:1 for something bigger.
         give_counts = [n for n in range(1, rules.max_give + 1) if n < n_recv or n == n_recv == 1]
@@ -377,7 +398,7 @@ def _answer_ad(ad: TradeAd, give_pool: list[ItemInfo], finder: ComboFinder, rule
                 continue  # not an upgrade for them
             if kind == DOWNGRADE and combo[0].trade_value <= biggest_offer:
                 continue
-            if tags == {"rares"} and not any(i.rare for i in combo):
+            if not _satisfies_tags(tags, combo):
                 continue
             trade = Trade(kind, combo, list(receive), receive_robux=ad.offer_robux, ad=ad)
             trade.score = score_trade(trade)

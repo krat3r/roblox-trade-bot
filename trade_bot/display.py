@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import sys
 import time
 
 from .engine import Trade
 from .models import DEMAND_LABELS, TREND_LABELS, Inventory, ItemInfo
+
+
+def safe_console() -> None:
+    """Item names can contain characters an old Windows code page can't print."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def fmt(n: int) -> str:

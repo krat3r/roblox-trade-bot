@@ -9,6 +9,26 @@ from .models import ItemInfo
 
 RECENT_ADS_URL = "https://api.rolimons.com/tradeads/v1/getrecentads"
 
+# The API sends request tags as numbers, in the order the Rolimons trade ad form lists them.
+TAG_NAMES = {
+    1: "demand",
+    2: "rares",
+    3: "robux",
+    4: "any",
+    5: "upgrade",
+    6: "downgrade",
+    7: "rap",
+    8: "wishlist",
+    9: "projecteds",
+    10: "adds",
+}
+
+
+def tag_name(tag) -> str:
+    if isinstance(tag, int) or (isinstance(tag, str) and tag.isdigit()):
+        return TAG_NAMES.get(int(tag), f"tag{tag}")
+    return str(tag).lower()
+
 
 @dataclass
 class TradeAd:
@@ -63,7 +83,7 @@ def parse_trade_ads(payload: dict, catalog: dict[int, ItemInfo]) -> list[TradeAd
             offer_items=[catalog[a] for a in offer_ids],
             offer_robux=int(offer.get("robux") or 0),
             request_items=[catalog[a] for a in request_ids],
-            request_tags=[str(t).lower() for t in request.get("tags") or []],
+            request_tags=[tag_name(t) for t in request.get("tags") or []],
         ))
     return ads
 

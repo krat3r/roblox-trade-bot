@@ -7,7 +7,7 @@ import traceback
 
 from . import rolimons
 from .cli import print_suggestions
-from .display import fmt, print_inventory
+from .display import safe_console, fmt, print_inventory
 from .engine import TradeRules
 from .http import HttpError
 from .scanner import scan_player
@@ -42,6 +42,7 @@ def scan_once(username: str, catalog) -> None:
 
 
 def main() -> int:
+    safe_console()
     print(BANNER)
     print("Loading item values from Rolimons...")
     try:

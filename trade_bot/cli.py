@@ -12,7 +12,7 @@ import json
 import sys
 
 from . import rolimons
-from .display import print_inventory, print_section
+from .display import safe_console, print_inventory, print_section
 from .engine import KINDS, TradeRules, generate_trades
 from .http import HttpError
 from .models import ItemInfo
@@ -80,6 +80,7 @@ def build_rules(args, catalog: dict[int, ItemInfo]) -> TradeRules:
 
 
 def main(argv: list[str] | None = None) -> int:
+    safe_console()
     args = parse_args(argv)
     if not args.player:
         from .app import main as interactive_main
